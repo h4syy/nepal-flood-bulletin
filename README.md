@@ -84,12 +84,7 @@ src/
 
 ## Run locally
 
-```bash
-npm install
-npm run dev
-```
-
-No configuration required — it fetches the live sources on the first request.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local development setup and contribution instructions.
 
 ## Contributing — help wanted 🙏
 
@@ -107,19 +102,7 @@ sustainable and useful long-term, it needs help. **High-impact areas:**
 - **Translations & accessibility.**
 - **Reliability.** Better caching (ISR/edge), source-health monitoring.
 
-**Adding a data source** is intentionally small — a module that returns
-`Person[]`, wired into the merge:
-
-```ts
-// src/lib/mysource.ts
-import type { Person } from "@/lib/feed";
-
-export async function getMySource(): Promise<Person[]> {
-  const res = await fetch(URL, { cache: "no-store" });
-  return parse(await res.text()); // → Person[] with { name, age, source, status, ... }
-}
-// then add getMySource() to the Promise.all + dedupe in src/app/page.tsx
-```
+For detailed instructions on adding a data source, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 **To contribute:** open an issue or a PR. Have a new official data source, a
 correction, or want to help? Reach out — [@yash_paudel](https://x.com/yash_paudel)
