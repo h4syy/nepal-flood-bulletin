@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { SITE } from "@/lib/config";
+import { cachedSource } from "@/lib/serverCache";
 
 const StationSchema = z
   .object({
@@ -69,20 +70,12 @@ export type RiversData = {
   };
 };
 
-let cache: {
-  parsed: z.infer<typeof RiversSchema>;
-  fetchedAt: number;
-} | null = null;
-let lastStatus: RiversData["status"] = "never";
-let lastAttempt = 0;
-const TTL_MS = 5 * 60 * 1000;
-const MIN_GAP_MS = 30_000;
+const REVALIDATE_S = 180;
 const TIMEOUT_MS = 8_000;
 
-async function fetchRivers(): Promise<z.infer<typeof RiversSchema>> {
+async function fetchRivers(): Promise<{ parsed: z.infer<typeof RiversSchema>; fetchedAt: string }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-  lastAttempt = Date.now();
   try {
     const res = await fetch(SITE.defaultRiverUrl, {
       signal: controller.signal,
@@ -91,16 +84,14 @@ async function fetchRivers(): Promise<z.infer<typeof RiversSchema>> {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const parsed = RiversSchema.parse(await res.json());
-    cache = { parsed, fetchedAt: Date.now() };
-    lastStatus = "ok";
-    return parsed;
-  } catch (err) {
-    lastStatus = "error";
-    throw err;
+    return { parsed, fetchedAt: new Date().toISOString() };
   } finally {
     clearTimeout(timer);
   }
 }
+
+// Shared across instances; fetched at most once per revalidate window (see #8/#9).
+const riversCached = cachedSource("rivers", fetchRivers, REVALIDATE_S);
 
 function trendOf(steady?: string | null): Station["trend"] {
   const s = (steady || "").toUpperCase();
@@ -158,37 +149,33 @@ function normalize(station: z.infer<typeof StationSchema>): Station {
 }
 
 export async function getRivers(): Promise<RiversData> {
-  const stale = !cache || Date.now() - cache.fetchedAt > TTL_MS;
-
-  if (!cache) {
-    try {
-      await fetchRivers();
-    } catch {
-      /* fall through to empty */
-    }
-  } else if (stale && Date.now() - lastAttempt > MIN_GAP_MS) {
-    void fetchRivers().catch(() => {});
+  let snap: { parsed: z.infer<typeof RiversSchema>; fetchedAt: string } | null = null;
+  try {
+    snap = await riversCached();
+  } catch {
+    /* fall through to empty */
   }
 
-  const empty: RiversData = {
-    updatedAt: null,
-    fetchedAt: cache ? new Date(cache.fetchedAt).toISOString() : null,
-    status: lastStatus,
-    stations: [],
-    summary: {
-      total: 0,
-      danger: 0,
-      warning: 0,
-      normal: 0,
-      aboveWarning: 0,
-      anyDanger: false,
-      anyWarning: false,
-      maxPctToDanger: null,
-    },
-  };
-  if (!cache) return empty;
+  if (!snap) {
+    return {
+      updatedAt: null,
+      fetchedAt: null,
+      status: "error",
+      stations: [],
+      summary: {
+        total: 0,
+        danger: 0,
+        warning: 0,
+        normal: 0,
+        aboveWarning: 0,
+        anyDanger: false,
+        anyWarning: false,
+        maxPctToDanger: null,
+      },
+    };
+  }
 
-  const stations = cache.parsed.stations.map(normalize);
+  const stations = snap.parsed.stations.map(normalize);
   const danger = stations.filter((s) => s.risk === "danger").length;
   const warning = stations.filter((s) => s.risk === "warning").length;
   const normal = stations.filter((s) => s.risk === "normal").length;
@@ -199,9 +186,9 @@ export async function getRivers(): Promise<RiversData> {
   const maxPctToDanger = pcts.length ? Math.round(Math.max(...pcts)) : null;
 
   return {
-    updatedAt: cache.parsed.updated_at ?? null,
-    fetchedAt: new Date(cache.fetchedAt).toISOString(),
-    status: lastStatus,
+    updatedAt: snap.parsed.updated_at ?? null,
+    fetchedAt: snap.fetchedAt,
+    status: "ok",
     stations,
     summary: {
       total: stations.length,

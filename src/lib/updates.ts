@@ -1,4 +1,5 @@
 import { SITE } from "@/lib/config";
+import { cachedSource } from "@/lib/serverCache";
 
 /**
  * Live "what just changed" feed for the floating panel. Two sources, combined:
@@ -20,8 +21,7 @@ export type UpdateItem = {
 const BULLETIN = "https://nirajbhusal.github.io/rasuwa-flood-bulletin/";
 const LATEST_URL = `${BULLETIN}latest.json`;
 
-let cache: { items: UpdateItem[]; at: number } | null = null;
-const TTL_MS = 3 * 60 * 1000;
+const REVALIDATE_S = 180;
 const TIMEOUT_MS = 8_000;
 
 async function fetchLatest(signal: AbortSignal): Promise<UpdateItem[]> {
@@ -73,9 +73,7 @@ async function fetchCommits(signal: AbortSignal): Promise<UpdateItem[]> {
   }
 }
 
-export async function getRecentUpdates(): Promise<UpdateItem[]> {
-  if (cache && Date.now() - cache.at < TTL_MS) return cache.items;
-
+async function fetchUpdates(): Promise<UpdateItem[]> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
@@ -83,10 +81,19 @@ export async function getRecentUpdates(): Promise<UpdateItem[]> {
       fetchLatest(controller.signal),
       fetchCommits(controller.signal),
     ]);
-    const items = [...latest, ...commits];
-    if (items.length) cache = { items, at: Date.now() };
-    return items.length ? items : (cache?.items ?? []);
+    return [...latest, ...commits];
   } finally {
     clearTimeout(timer);
+  }
+}
+
+// Shared across instances; fetched at most once per revalidate window (see #8/#9).
+const updatesCached = cachedSource("updates", fetchUpdates, REVALIDATE_S);
+
+export async function getRecentUpdates(): Promise<UpdateItem[]> {
+  try {
+    return await updatesCached();
+  } catch {
+    return [];
   }
 }

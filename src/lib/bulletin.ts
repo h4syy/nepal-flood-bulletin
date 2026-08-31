@@ -1,5 +1,6 @@
 import { SITE } from "@/lib/config";
 import type { Person } from "@/lib/feed";
+import { cachedSource } from "@/lib/serverCache";
 
 /**
  * Rescued-persons lists published on the community Rasuwa Flood Bulletin
@@ -8,14 +9,15 @@ import type { Person } from "@/lib/feed";
  * everyone in one place, and each card deep-links back to the exact section on
  * the bulletin as its source.
  *
- * Fetched live and cached in-memory; on any failure we serve the last good
- * snapshot (or nothing — the NDRRMA API still covers the core list).
+ * Fetched live and stored in Vercel's shared Data Cache (see serverCache.ts);
+ * on any failure the cache keeps serving the last good snapshot (or nothing —
+ * the NDRRMA API still covers the core list).
  */
 
 const BASE = SITE.attribution.url.replace(/\/+$/, ""); // no trailing slash
 const HTML_URL = `${BASE}/`;
 const FETCH_TIMEOUT_MS = 9_000;
-const TTL_MS = 10 * 60 * 1000;
+const REVALIDATE_S = 180;
 
 // ---- small helpers ---------------------------------------------------------
 
@@ -192,33 +194,28 @@ export function parseHospitalStats(html: string): HospitalStat[] {
 
 // ---- fetch + cache (HTML fetched once, both views derived from it) ----------
 
-let htmlCache: { html: string; at: number } | null = null;
-let inflight: Promise<string> | null = null;
-
 async function fetchHtml(): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
     const res = await fetch(HTML_URL, { signal: controller.signal, cache: "no-store" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const html = await res.text();
-    if (html.length) htmlCache = { html, at: Date.now() };
-    return html;
+    return await res.text();
   } finally {
     clearTimeout(timer);
   }
 }
 
+// The HTML lands in the shared Data Cache once per revalidate window; both views
+// below are derived from the same cached copy (see #8/#9).
+const htmlCached = cachedSource("bulletin-html", fetchHtml, REVALIDATE_S);
+
 async function getHtml(): Promise<string> {
-  if (htmlCache && Date.now() - htmlCache.at < TTL_MS) return htmlCache.html;
-  if (!inflight) {
-    inflight = fetchHtml()
-      .catch(() => htmlCache?.html ?? "") // serve stale snapshot, else empty
-      .finally(() => {
-        inflight = null;
-      });
+  try {
+    return await htmlCached();
+  } catch {
+    return "";
   }
-  return inflight;
 }
 
 export async function getBulletinRescued(): Promise<Person[]> {
