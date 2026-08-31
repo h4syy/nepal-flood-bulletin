@@ -1,7 +1,6 @@
 import { z } from "zod";
 import { SITE } from "@/lib/config";
 import { parseReportTime, isForeign, detectCountry } from "@/lib/derive";
-import { cachedSource } from "@/lib/serverCache";
 
 // ---------- Upstream JSON schema (kept lenient; we never reject the whole feed
 // because one entry is odd) ----------
@@ -82,22 +81,50 @@ export type NormalizedFeed = {
   stale: boolean; // serving cached data while the live source is failing
 };
 
-// ---------- Fetch + shared cache ----------
-//
-// The feed payload lives in Vercel's shared Data Cache (see serverCache.ts), so
-// every instance reads the same snapshot and the upstream is fetched at most
-// once per revalidate window — not once per cold serverless start (which is why
-// the old fire-and-forget "background refresh" never really ran: a serverless
-// instance freezes the moment it responds). A tiny per-instance parse cache
-// avoids re-parsing an unchanged payload, and a per-instance "last good" lets us
-// keep serving if a live fetch fails outright.
-
-const FETCH_TIMEOUT_MS = 8_000;
-const REVALIDATE_S = 180;
+// ---------- In-memory caches (per running server process) ----------
 
 let parsedCache: { payload: string; feed: z.infer<typeof FeedSchema> } | null =
   null;
-let lastGood: { text: string; fetchedAt: string } | null = null;
+let lastAttemptMs = 0;
+const MIN_ATTEMPT_GAP_MS = 30_000; // throttle background refetch attempts
+const FETCH_TIMEOUT_MS = 8_000;
+
+// ---------- In-memory feed config + snapshot (no DB required) ----------
+
+type FeedConfigShape = {
+  id: number;
+  feedUrl: string;
+  backupFeedUrl: string;
+  refreshInterval: number;
+  lastFetchedAt: Date | null;
+  lastStatus: "ok" | "error" | "never";
+  lastError: string;
+  lastGoodPayload: string;
+};
+
+const feedState: FeedConfigShape = {
+  id: 1,
+  feedUrl: SITE.defaultFeedUrl,
+  backupFeedUrl: SITE.backupFeedUrl,
+  refreshInterval: 300,
+  lastFetchedAt: null,
+  lastStatus: "never",
+  lastError: "",
+  lastGoodPayload: "",
+};
+
+export async function getFeedConfig(): Promise<FeedConfigShape> {
+  return feedState;
+}
+
+export function updateFeedConfig(
+  patch: Partial<Omit<FeedConfigShape, "id" | "lastGoodPayload">>,
+): FeedConfigShape {
+  Object.assign(feedState, patch);
+  return feedState;
+}
+
+// ---------- Fetch + cache ----------
 
 async function fetchJson(url: string): Promise<string> {
   const controller = new AbortController();
@@ -117,12 +144,14 @@ async function fetchJson(url: string): Promise<string> {
 
 /**
  * Fetch the upstream feed with failover across sources (GitHub Pages -> the
- * raw committed file) and validate its shape. Throws if none is reachable/valid.
+ * raw committed file), validate it, and store the snapshot. Throws on failure.
  */
-async function fetchPayload(): Promise<{ text: string; fetchedAt: string }> {
+export async function fetchAndCache(): Promise<void> {
+  lastAttemptMs = Date.now();
+
   const candidates = [
-    SITE.defaultFeedUrl,
-    SITE.backupFeedUrl,
+    feedState.feedUrl,
+    feedState.backupFeedUrl,
     SITE.rawFeedUrl,
   ].filter((u, i, arr) => u && arr.indexOf(u) === i);
 
@@ -136,14 +165,33 @@ async function fetchPayload(): Promise<{ text: string; fetchedAt: string }> {
       lastErr = e;
     }
   }
-  if (text === undefined) {
-    throw lastErr instanceof Error ? lastErr : new Error("no feed source reachable");
+
+  try {
+    if (text === undefined) {
+      throw lastErr instanceof Error ? lastErr : new Error("no feed source reachable");
+    }
+    const json = JSON.parse(text);
+    FeedSchema.parse(json); // validate shape; throws if wildly wrong
+    feedState.lastGoodPayload = text;
+    feedState.lastFetchedAt = new Date();
+    feedState.lastStatus = "ok";
+    feedState.lastError = "";
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    feedState.lastStatus = "error";
+    feedState.lastError = message;
+    throw err;
   }
-  FeedSchema.parse(JSON.parse(text)); // validate shape; throws if wildly wrong
-  return { text, fetchedAt: new Date().toISOString() };
 }
 
-const payloadCached = cachedSource("feed", fetchPayload, REVALIDATE_S);
+function maybeBackgroundRefresh() {
+  if (Date.now() - lastAttemptMs < MIN_ATTEMPT_GAP_MS) return;
+  // Fire and forget - the running server process lives long enough to finish it,
+  // and the fresh snapshot is picked up on the next request.
+  void fetchAndCache().catch(() => {
+    /* already recorded on FeedConfig */
+  });
+}
 
 function normalizeEntry(
   raw: RawEntry,
@@ -186,41 +234,49 @@ function normalizeEntry(
 // ---------- Public read API ----------
 
 export async function getFeed(): Promise<NormalizedFeed> {
-  let snap: { text: string; fetchedAt: string } | null = null;
-  let fetchFailed = false;
-  try {
-    snap = await payloadCached();
-    lastGood = snap;
-  } catch {
-    // Live fetch failed (and nothing cached yet) — serve this instance's last
-    // good snapshot if we have one, otherwise an empty feed.
-    fetchFailed = true;
-    snap = lastGood;
+  let cfg = await getFeedConfig();
+
+  const hasSnapshot = cfg.lastGoodPayload !== "";
+  const ageMs = cfg.lastFetchedAt
+    ? Date.now() - cfg.lastFetchedAt.getTime()
+    : Infinity;
+  const isStale = ageMs / 1000 > cfg.refreshInterval;
+
+  if (!hasSnapshot) {
+    // First ever load: block on a fetch so the page isn't empty.
+    try {
+      await fetchAndCache();
+      cfg = await getFeedConfig();
+    } catch {
+      /* fall through to empty feed below */
+    }
+  } else if (isStale) {
+    maybeBackgroundRefresh();
   }
 
   const empty: NormalizedFeed = {
     updatedAt: null,
-    fetchedAt: snap ? snap.fetchedAt : null,
+    fetchedAt: cfg.lastFetchedAt ? cfg.lastFetchedAt.toISOString() : null,
     sheetUrl: null,
     forms: { missing: null, found: null },
     missing: [],
     found: [],
     matchedCount: 0,
     counts: { missing: 0, found: 0 },
-    status: snap ? "ok" : "error",
-    sourceUrl: SITE.defaultFeedUrl,
-    stale: fetchFailed,
+    status: cfg.lastStatus as NormalizedFeed["status"],
+    sourceUrl: cfg.feedUrl,
+    stale: cfg.lastStatus === "error",
   };
 
-  if (!snap) return empty;
+  if (cfg.lastGoodPayload === "") return empty;
 
   let feed: z.infer<typeof FeedSchema>;
-  if (parsedCache && parsedCache.payload === snap.text) {
+  if (parsedCache && parsedCache.payload === cfg.lastGoodPayload) {
     feed = parsedCache.feed;
   } else {
     try {
-      feed = FeedSchema.parse(JSON.parse(snap.text));
-      parsedCache = { payload: snap.text, feed };
+      feed = FeedSchema.parse(JSON.parse(cfg.lastGoodPayload));
+      parsedCache = { payload: cfg.lastGoodPayload, feed };
     } catch {
       return empty;
     }
@@ -231,7 +287,7 @@ export async function getFeed(): Promise<NormalizedFeed> {
 
   return {
     updatedAt: feed.updated_at ?? null,
-    fetchedAt: snap.fetchedAt,
+    fetchedAt: cfg.lastFetchedAt ? cfg.lastFetchedAt.toISOString() : null,
     sheetUrl: feed.sheet ?? null,
     forms: {
       missing: feed.forms?.missing ?? null,
@@ -241,8 +297,8 @@ export async function getFeed(): Promise<NormalizedFeed> {
     found,
     matchedCount: feed.matched.length,
     counts: { missing: missing.length, found: found.length },
-    status: "ok",
-    sourceUrl: SITE.defaultFeedUrl,
-    stale: fetchFailed,
+    status: cfg.lastStatus as NormalizedFeed["status"],
+    sourceUrl: cfg.feedUrl,
+    stale: cfg.lastStatus === "error" && hasSnapshot,
   };
 }
