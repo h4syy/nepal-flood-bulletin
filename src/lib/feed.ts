@@ -66,6 +66,8 @@ export type Person = {
   status: PersonStatus;
   flagged?: boolean;
   possiblyRescued?: boolean; // listed as missing but also appears in the rescued list
+  ndrrmaId?: string;
+  floodLinked?: boolean;
 };
 
 export type NormalizedFeed = {

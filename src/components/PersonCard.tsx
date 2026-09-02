@@ -58,6 +58,15 @@ function PhoneIcon() {
   );
 }
 
+function InfoIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className="h-3.5 w-3.5 shrink-0 text-amber-600" aria-hidden>
+      <circle cx="12" cy="12" r="8.5" stroke="currentColor" strokeWidth="1.7" />
+      <path d="M12 8.25v-.5M12 11v5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function Row({ icon, children }: { icon: React.ReactNode; children: React.ReactNode }) {
   return (
     <div className="flex items-start gap-1.5 text-sm text-slate-600">
@@ -215,6 +224,13 @@ export default function PersonCard({
             </span>
           )}
         </div>
+
+        {person.floodLinked === false && (
+          <div className="mt-2 flex items-start gap-1.5 text-[11px] leading-snug text-amber-800/90">
+            <span className="mt-0.5"><InfoIcon /></span>
+            <span className="min-w-0 break-words">{m.genericAdvisory}</span>
+          </div>
+        )}
       </div>
     </div>
   );

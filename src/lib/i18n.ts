@@ -204,6 +204,8 @@ const en = {
   possiblyRescuedNote: "May already be rescued — check the Rescued list",
   searchableHere: "searchable by name here",
   resultsLoading: "Loading the people list…",
+  genericAdvisory:
+    "Listed in the national missing/found registry — not explicitly recorded as flood-related.",
 };
 
 const ne: typeof en = {
@@ -402,6 +404,8 @@ const ne: typeof en = {
   possiblyRescuedNote: "उद्धार भइसकेको हुन सक्छ — उद्धार सूची जाँच्नुहोस्",
   searchableHere: "यहाँ नामबाट खोज्न मिल्ने",
   resultsLoading: "व्यक्ति सूची लोड हुँदै…",
+  genericAdvisory:
+    "राष्ट्रिय हराएको/भेटिएको दर्ता प्रणालीमा समावेश — बाढीसँग सम्बन्धित हो/होइन स्पष्ट छैन।",
 };
 
 export const messages = { en, ne } as const;

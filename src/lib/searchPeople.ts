@@ -87,23 +87,27 @@ export function searchPeople({
   } else {
     const plainQ = raw.toLowerCase();
     const qWords = romanKey(raw).split(" ").filter(Boolean);
-    const exact: Person[] = [];
+    const exactName: Person[] = [];
+    const exactOther: Person[] = [];
     const fuzzy: Person[] = [];
 
     for (const p of base) {
       const blob = [p.name, p.nameEn, p.place, p.phone, p.note, p.when]
         .filter(Boolean)
         .join(" ");
+      const nameBlob = [p.name, p.nameEn].filter(Boolean).join(" ");
       const plain = blob.toLowerCase();
+      const plainName = nameBlob.toLowerCase();
       const key = romanKey(blob);
 
-      if (plain.includes(plainQ)) exact.push(p);
+      if (plainName.includes(plainQ)) exactName.push(p);
+      else if (plain.includes(plainQ)) exactOther.push(p);
       else if (qWords.length > 0 && qWords.every((w) => key.includes(w)))
         fuzzy.push(p);
     }
 
     fuzzyCount = fuzzy.length;
-    results = [...exact, ...fuzzy];
+    results = [...exactName, ...exactOther, ...fuzzy];
   }
 
   const total = results.length;
